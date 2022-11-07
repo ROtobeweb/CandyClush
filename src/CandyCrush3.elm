@@ -1,4 +1,4 @@
-port module CandyCrush exposing (..)
+port module CandyCrush3 exposing (..)
 
 import Browser
 import Html exposing (Html)
@@ -11,6 +11,10 @@ import Time
 import Random
 import Html.Events.Extra.Pointer exposing (..)
 import Json.Encode
+import Simple.Animation as Animation exposing (Animation)
+import Simple.Animation.Animated as Animated
+import Simple.Animation.Property as P
+
 
 port sound: Json.Encode.Value -> Cmd msg
 
@@ -28,6 +32,9 @@ type CandyType = Red
 
 type alias Piece = {x:Int
                    ,y:Int
+                   ,xStartAt:Int
+                   ,yStartAt:Int
+                   ,scaleStartAt: Float
                    ,color:Int
                    ,matching:Bool
                    ,moving:Bool
@@ -73,6 +80,9 @@ newPiece: Int -> Piece
 newPiece i =
     {x=(modBy hSize i)
     ,y=(i // hSize)
+    ,xStartAt=(modBy hSize i)
+    ,yStartAt=(i // hSize)
+    ,scaleStartAt=1
     ,color = 0
     ,matching = False
     ,moving = False
@@ -138,7 +148,7 @@ deleteMatch model =
 
 dropColumn: List Piece -> List Piece
 dropColumn conf =
-    List.sortBy .y conf |> List.indexedMap (\i p -> {p| y=i})
+    List.sortBy .y conf |> List.indexedMap (\i p -> {p| y=i, yStartAt=p.y})
 
 drop: Model -> Model
 drop model =
@@ -146,8 +156,7 @@ drop model =
         conf = List.concat <| List.map(\j ->drop1 j model) (List.range 0 4)
     in
         {model | conf=conf
-        ,state = Adding
-        ,elapsed = 0}
+        }
 
 
 drop1: Int -> Model -> List Piece
@@ -172,6 +181,7 @@ add1: Int -> List Int -> Model -> List Piece
 add1 j rList model =
     let
         column = List.filter (\p -> p.x==j) model.conf
+        normalized = List.map (\p -> {p|xStartAt=p.x, yStartAt=p.y}) column
         colors = List.take (5-(List.length column)) rList
         addend = List.indexedMap
                  (\i c -> {x = j
@@ -181,10 +191,13 @@ add1 j rList model =
                           ,moving = False
                           ,current = Position 0 0
                           ,start = Position 0 0
+                          ,xStartAt = j
+                          ,yStartAt =((List.length column) +i)
+                          ,scaleStartAt=0
                           })
                  colors
     in
-        List.concat [column,addend]
+        List.concat [addend, normalized]
 
 
 
@@ -259,15 +272,23 @@ update msg model =
         Elapsed t ->
             case model.state of
                 Waiting ->
-                    (match model, Cmd.none)
+                    let
+                        normalized = List.map (\p -> {p|scaleStartAt=1}) model.conf
+                    in
+                        (match {model|conf=normalized}, Cmd.none)
                 Matching ->
-                    if model.elapsed > 1 then
+                    if model.elapsed > 5 then
                         (deleteMatch model,Cmd.none)
                     else
                         ({model | elapsed = (model.elapsed+1)},Cmd.none)
                 Deleting ->
-                    if model.elapsed > 1 then
-                        (drop model
+                    if model.elapsed == 0 then
+                        let
+                            newModel = drop model
+                        in
+                            ({newModel| elapsed = newModel.elapsed + 1}, Cmd.none)
+                    else if model.elapsed > 5 then
+                        ({model | state = Adding}
                         ,Random.generate Added (Random.list 25 (Random.int 0 4)))
                     else
                         ({model | elapsed = (model.elapsed+1)},Cmd.none)
@@ -299,6 +320,14 @@ pieceView pdata =
                     (toFloat <| hSize*unit-pdata.y*unit+100)+pdata.current.y-pdata.start.y
                 else
                     toFloat <| hSize*unit-pdata.y*unit+100
+        startXpixel = if pdata.moving then
+                    (toFloat <| pdata.xStartAt*unit+100)+pdata.current.x-pdata.start.x
+                else
+                    toFloat (pdata.xStartAt*unit+100)
+        startYpixel = if pdata.moving then
+                    (toFloat <| hSize*unit-pdata.yStartAt*unit+100)+pdata.current.y-pdata.start.y
+                else
+                    toFloat <| hSize*unit-pdata.yStartAt*unit+100
         shape color =
           case color of
            0 -> g[][circle [cx (String.fromInt (unit//2)) --grape1
@@ -472,28 +501,32 @@ pieceView pdata =
                             ,fill "white"
                             ][]
                    ]
+        anim = if pdata.matching then
+                   fade {x=xpixel, y=ypixel}
+               else
+                   normal {x=xpixel, y=ypixel} {x=startXpixel, y=startYpixel} pdata.scaleStartAt
     in
-    g [transform ("translate(" ++ (String.fromFloat xpixel)
-                      ++ "," ++ (String.fromFloat ypixel) ++ ")")
-      ,onDown (relativePos >> (MoveStart pdata))
-      ,onMove (relativePos >> Move)
-      ,onUp (relativePos >> MoveEnd)
-      ]
-    [rect [x "0"
-          ,y "0"
-          ,width (String.fromInt unit)
-          ,height (String.fromInt unit)
-          ,stroke "white"
-          ,strokeWidth "4px"
-          ,fill (if pdata.matching then
-                        "red"
-                    else
-                        "#aaa")
-          ]
-         [
-         ]
-    ,(shape pdata.color)
-    ]
+        animatedG (anim )
+            [transform ("translate(" ++ (String.fromFloat xpixel)
+                            ++ "," ++ (String.fromFloat ypixel) ++ ")")
+            ,onDown (relativePos >> (MoveStart pdata))
+            ,onMove (relativePos >> Move)
+            ,onUp (relativePos >> MoveEnd)
+            ]
+        [rect [x "0"
+              ,y "0"
+              ,width (String.fromInt unit)
+              ,height (String.fromInt unit)
+              ,stroke "white"
+              ,strokeWidth "4px"
+              ,fill (if pdata.matching then
+                         "red"
+                     else
+                         "#aaa")
+              ]
+             []
+        ,(shape pdata.color)
+        ]
 
 relativePos : Event -> {x:Float, y:Float}
 relativePos event =
@@ -501,14 +534,53 @@ relativePos event =
     ,y=(Tuple.second event.pointer.offsetPos)-100
     }
 
+animatedSvg =
+    Animated.svg
+        { class = Svg.Attributes.class
+        }
+        
+animatedG : Animation -> List (Svg.Attribute msg) -> List (Svg msg) -> Svg msg
+animatedG =
+    animatedSvg Svg.g
+        
+fade : {x:Float, y:Float} -> Animation
+fade pos =
+    Animation.steps
+        {startAt = [P.x pos.x
+                   ,P.y pos.y
+                   ]
+        ,options = []
+        }
+        [Animation.step 1000 [P.x 0
+                             ,P.y 0
+                             ,P.scale 0
+                             ]
+        ]
+normal : {x:Float, y:Float} -> {x:Float, y:Float} -> Float->Animation
+normal pos startPos startScale =
+    Animation.steps
+        {startAt = [ P.x startPos.x
+                   , P.y startPos.y
+                   , P.scale startScale
+                   ]
+        ,options = []
+        }
+        [Animation.step 500 [P.x pos.x, P.y pos.y, P.scale 1]
+        ]
+
+
+        
 view model =
     Html.div [Html.Attributes.style "touch-action" "none"]
         [svg [width "800"
              ,height "800"
              ]
-             (List.map pieceView model.conf)
+             (List.map pieceView (List.sortBy (\p -> if p.matching then
+                                                         1
+                                                     else
+                                                         0) model.conf))
         ]
 
 subscriptions: Model -> Sub Msg
 subscriptions model =
-    Time.every 100 Elapsed
+    Time.every 120 Elapsed
